@@ -31,6 +31,7 @@
 #include <queue>
 #include <stdexcept>
 #include <vector>
+#include <map>
 
 #include "champsim.h"
 #include "champsim_constants.h"
@@ -195,6 +196,10 @@ public:
   struct module_concept {
     virtual ~module_concept() = default;
 
+    virtual void impl_initialize_branch_address_predictor() = 0;
+    virtual uint64_t impl_predict_branch_address(uint64_t ip) = 0;
+    virtual void impl_last_branch_address_result(uint64_t ip, uint64_t actual_target, uint8_t taken, uint8_t branch_type) = 0;
+
     virtual void impl_initialize_branch_predictor() = 0;
     virtual void impl_last_branch_result(uint64_t ip, uint64_t target, uint8_t taken, uint8_t branch_type) = 0;
     virtual uint8_t impl_predict_branch(uint64_t ip) = 0;
@@ -204,10 +209,13 @@ public:
     virtual std::pair<uint64_t, uint8_t> impl_btb_prediction(uint64_t ip) = 0;
   };
 
-  template <unsigned long long B_FLAG, unsigned long long T_FLAG>
+  template <unsigned long long A_FLAG, unsigned long long B_FLAG, unsigned long long T_FLAG>
   struct module_model final : module_concept {
     O3_CPU* intern_;
     explicit module_model(O3_CPU* core) : intern_(core) {}
+    void impl_initialize_branch_address_predictor();
+    uint64_t impl_predict_branch_address(uint64_t ip);
+    void impl_last_branch_address_result(uint64_t ip, uint64_t actual_target, uint8_t taken, uint8_t branch_type);
 
     void impl_initialize_branch_predictor();
     void impl_last_branch_result(uint64_t ip, uint64_t target, uint8_t taken, uint8_t branch_type);
@@ -220,9 +228,16 @@ public:
 
   std::unique_ptr<module_concept> module_pimpl;
 
+  void impl_initialize_branch_address_predictor() { module_pimpl->impl_initialize_branch_address_predictor(); }
+  void impl_last_branch_address_result(uint64_t ip, uint64_t actual_target, uint8_t taken, uint8_t branch_type) {
+    module_pimpl->impl_last_branch_address_result(ip, actual_target, taken, branch_type);
+  }
+  uint64_t impl_predict_branch_address(uint64_t ip) { return module_pimpl->impl_predict_branch_address(ip); }
+
   void impl_initialize_branch_predictor() { module_pimpl->impl_initialize_branch_predictor(); }
   void impl_last_branch_result(uint64_t ip, uint64_t target, uint8_t taken, uint8_t branch_type)
   {
+    //std::cout << "ip: " << ip << " target: " << target << " taken: " << taken << " branch_type: " << branch_type << std::endl;
     module_pimpl->impl_last_branch_result(ip, target, taken, branch_type);
   }
   uint8_t impl_predict_branch(uint64_t ip) { return module_pimpl->impl_predict_branch(ip); }
@@ -237,10 +252,10 @@ public:
   class builder_conversion_tag
   {
   };
-  template <unsigned long long B_FLAG = 0, unsigned long long T_FLAG = 0>
+  template <unsigned long long A_FLAG = 0, unsigned long long B_FLAG = 0, unsigned long long T_FLAG = 0>
   class Builder
   {
-    using self_type = Builder<B_FLAG, T_FLAG>;
+    using self_type = Builder<A_FLAG, B_FLAG, T_FLAG>;
 
     uint32_t m_cpu{};
     double m_freq_scale{};
@@ -275,8 +290,8 @@ public:
 
     friend class O3_CPU;
 
-    template <unsigned long long OTHER_B, unsigned long long OTHER_T>
-    Builder(builder_conversion_tag, const Builder<OTHER_B, OTHER_T>& other)
+    template <unsigned long long OTHER_A, unsigned long long OTHER_B, unsigned long long OTHER_T>
+    Builder(builder_conversion_tag, const Builder<OTHER_A, OTHER_B, OTHER_T>& other)
         : m_cpu(other.m_cpu), m_freq_scale(other.m_freq_scale), m_dib_set(other.m_dib_set), m_dib_way(other.m_dib_way), m_dib_window(other.m_dib_window),
           m_ifetch_buffer_size(other.m_ifetch_buffer_size), m_decode_buffer_size(other.m_decode_buffer_size),
           m_dispatch_buffer_size(other.m_dispatch_buffer_size), m_rob_size(other.m_rob_size), m_lq_size(other.m_lq_size), m_sq_size(other.m_sq_size),
@@ -437,27 +452,32 @@ public:
       return *this;
     }
 
-    template <unsigned long long B>
-    Builder<B, T_FLAG> branch_predictor()
+    template <unsigned long long A>
+    Builder<A, B_FLAG, T_FLAG> branch_address_predictor()
     {
-      return Builder<B, T_FLAG>{builder_conversion_tag{}, *this};
+      return Builder<A, B_FLAG, T_FLAG>{builder_conversion_tag{}, *this};
+    }
+    template <unsigned long long B>
+    Builder<A_FLAG, B, T_FLAG> branch_predictor()
+    {
+      return Builder<A_FLAG, B, T_FLAG>{builder_conversion_tag{}, *this};
     }
     template <unsigned long long T>
-    Builder<B_FLAG, T> btb()
+    Builder<A_FLAG, B_FLAG, T> btb()
     {
-      return Builder<B_FLAG, T>{builder_conversion_tag{}, *this};
+      return Builder<A_FLAG, B_FLAG, T>{builder_conversion_tag{}, *this};
     }
   };
 
-  template <unsigned long long B_FLAG, unsigned long long T_FLAG>
-  explicit O3_CPU(Builder<B_FLAG, T_FLAG> b)
+  template <unsigned long long A_FLAG, unsigned long long B_FLAG, unsigned long long T_FLAG>
+  explicit O3_CPU(Builder<A_FLAG, B_FLAG, T_FLAG> b)
       : champsim::operable(b.m_freq_scale), cpu(b.m_cpu), DIB(b.m_dib_set, b.m_dib_way, {champsim::lg2(b.m_dib_window)}, {champsim::lg2(b.m_dib_window)}),
         LQ(b.m_lq_size), IFETCH_BUFFER_SIZE(b.m_ifetch_buffer_size), DISPATCH_BUFFER_SIZE(b.m_dispatch_buffer_size), DECODE_BUFFER_SIZE(b.m_decode_buffer_size),
         ROB_SIZE(b.m_rob_size), SQ_SIZE(b.m_sq_size), FETCH_WIDTH(b.m_fetch_width), DECODE_WIDTH(b.m_decode_width), DISPATCH_WIDTH(b.m_dispatch_width),
         SCHEDULER_SIZE(b.m_schedule_width), EXEC_WIDTH(b.m_execute_width), LQ_WIDTH(b.m_lq_width), SQ_WIDTH(b.m_sq_width), RETIRE_WIDTH(b.m_retire_width),
         BRANCH_MISPREDICT_PENALTY(b.m_mispredict_penalty), DISPATCH_LATENCY(b.m_dispatch_latency), DECODE_LATENCY(b.m_decode_latency),
         SCHEDULING_LATENCY(b.m_schedule_latency), EXEC_LATENCY(b.m_execute_latency), L1I_BANDWIDTH(b.m_l1i_bw), L1D_BANDWIDTH(b.m_l1d_bw),
-        L1I_bus(b.m_cpu, b.m_fetch_queues), L1D_bus(b.m_cpu, b.m_data_queues), l1i(b.m_l1i), module_pimpl(std::make_unique<module_model<B_FLAG, T_FLAG>>(this))
+        L1I_bus(b.m_cpu, b.m_fetch_queues), L1D_bus(b.m_cpu, b.m_data_queues), l1i(b.m_l1i), module_pimpl(std::make_unique<module_model<A_FLAG, B_FLAG, T_FLAG>>(this))
   {
   }
 };
